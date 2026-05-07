@@ -1,0 +1,781 @@
+---
+title: "Car Price Prediction Project"
+subtitle: "Predictive Analytics Assignment in R"
+author: "Shreyansh Kumar Das"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+## Objective
+
+The objective of this project is to predict the selling price of used cars using regression, regularization, model selection, diagnostic analysis, and cross validation. The response variable is `selling_price`, and the main modelling target is `log_price`, which is the natural logarithm of selling price.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+
+set.seed(123)
+
+```
+
+## 1. Load Packages
+
+```{r load-packages}
+packages <- c("glmnet", "leaps", "car", "corrplot")
+
+for(pkg in packages){
+  if(!require(pkg, character.only = TRUE)){
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+```
+
+### Interpretation
+
+The analysis uses `glmnet` for Ridge, LASSO, and Elastic Net regression, `leaps` for subset selection, `car` for diagnostic tests and VIF values, and `corrplot` for visualizing correlations.
+
+## 2. Load Dataset and Check Structure
+
+
+```{r load-data}
+if (file.exists("CarPricing.csv")) {
+  car = read.csv("CarPricing.csv", stringsAsFactors = FALSE)
+} else {
+  car = read.csv("C:/Users/asus/Downloads/CarPricing (1).csv",
+                 stringsAsFactors = FALSE)
+}
+
+data.frame(Rows = nrow(car), Columns = ncol(car))
+```
+
+```{r dataset-structure}
+str(car)
+summary(car)
+```
+
+```{r missing-before}
+missing_before = data.frame(
+  Variable = names(car),
+  Missing_Values = colSums(is.na(car)),
+  row.names = NULL
+)
+
+knitr::kable(missing_before, caption = "Missing Values Before Cleaning")
+```
+
+### Interpretation
+
+The dataset contains used car details such as year, kilometres driven, fuel type, seller type, transmission, ownership, mileage, engine capacity, maximum power, seats, and selling price. Before modelling, the structure and missing values are checked to identify variables that need conversion or cleaning.
+
+## 3. Data Preprocessing
+
+
+```{r data-preprocessing}
+# Renaming mileage column because the original name is long after read.csv().
+names(car)[names(car) == "mileage.km.ltr.kg."] = "mileage"
+
+# Converting numerical columns.
+car$selling_price = as.numeric(car$selling_price)
+car$year = as.numeric(car$year)
+car$km_driven = as.numeric(car$km_driven)
+car$mileage = as.numeric(car$mileage)
+car$engine = as.numeric(car$engine)
+car$max_power = as.numeric(car$max_power)
+car$seats = as.numeric(car$seats)
+
+# Treating impossible values as missing.
+car$mileage[car$mileage <= 0] = NA
+car$engine[car$engine <= 0] = NA
+car$max_power[car$max_power <= 0] = NA
+car$seats[car$seats <= 0] = NA
+
+# Replacing missing numeric values with median.
+car$mileage[is.na(car$mileage)] = median(car$mileage, na.rm = TRUE)
+car$engine[is.na(car$engine)] = median(car$engine, na.rm = TRUE)
+car$max_power[is.na(car$max_power)] = median(car$max_power, na.rm = TRUE)
+car$seats[is.na(car$seats)] = median(car$seats, na.rm = TRUE)
+
+# Converting categorical variables to factors.
+car$fuel = factor(car$fuel)
+car$seller_type = factor(car$seller_type)
+car$transmission = factor(car$transmission)
+car$owner = factor(car$owner)
+
+# Using brand instead of full car name.
+car$brand = sub(" .*", "", car$name)
+brand_table = table(car$brand)
+rare_brands = names(brand_table[brand_table < 20])
+car$brand[car$brand %in% rare_brands] = "Other"
+car$brand = factor(car$brand)
+
+# Creating useful variables.
+latest_year = max(car$year, na.rm = TRUE)
+car$car_age = latest_year - car$year
+car$log_price = log(car$selling_price)
+car$log_km_driven = log(car$km_driven + 1)
+
+# Standardizing variables, useful for interpretation.
+car$age_z = as.numeric(scale(car$car_age))
+car$km_z = as.numeric(scale(car$log_km_driven))
+car$mileage_z = as.numeric(scale(car$mileage))
+car$engine_z = as.numeric(scale(car$engine))
+car$power_z = as.numeric(scale(car$max_power))
+
+missing_after = data.frame(
+  Variable = names(car),
+  Missing_Values = colSums(is.na(car)),
+  row.names = NULL
+)
+
+knitr::kable(missing_after, caption = "Missing Values After Cleaning")
+```
+
+### Interpretation
+
+Missing numerical values were replaced by median values because the median is less affected by extreme observations than the mean. The original `name` variable contains too many unique car names, so it was simplified into the `brand` variable. Rare brands were grouped as `Other` to avoid very small categories.
+
+The response variable was transformed into `log_price` because car prices are usually right-skewed. The variable `car_age` was created from the year of manufacture, and `log_km_driven` was created to reduce the skewness of kilometres driven.
+
+## 4. Exploratory Data Analysis
+
+
+```{r correlation-analysis}
+numeric_vars = car[, c("selling_price", "log_price", "year", "car_age",
+                       "km_driven", "log_km_driven", "mileage",
+                       "engine", "max_power", "seats")]
+
+cor_matrix = cor(numeric_vars)
+knitr::kable(round(cor_matrix, 3), caption = "Correlation Matrix")
+```
+
+```{r eda-plots}
+corrplot(cor_matrix, method = "color")
+
+hist(car$selling_price,
+     main = "Histogram of Selling Price",
+     xlab = "Selling price",
+     col = "lightblue")
+
+hist(car$log_price,
+     main = "Histogram of Log Selling Price",
+     xlab = "Log selling price",
+     col = "lightgreen")
+
+plot(car$max_power, car$selling_price,
+     main = "Selling Price vs Max Power",
+     xlab = "Max power",
+     ylab = "Selling price",
+     pch = 16,
+     col = "gray")
+abline(lm(selling_price ~ max_power, data = car), col = "red", lwd = 2)
+
+plot(car$km_driven, car$selling_price,
+     main = "Selling Price vs Kilometres Driven",
+     xlab = "Kilometres driven",
+     ylab = "Selling price",
+     pch = 16,
+     col = "gray")
+abline(lm(selling_price ~ km_driven, data = car), col = "red", lwd = 2)
+
+boxplot(selling_price ~ transmission,
+        data = car,
+        log = "y",
+        main = "Selling Price by Transmission",
+        xlab = "Transmission",
+        ylab = "Selling price, log scale",
+        col = "lightblue")
+
+boxplot(selling_price ~ fuel,
+        data = car,
+        log = "y",
+        main = "Selling Price by Fuel Type",
+        xlab = "Fuel type",
+        ylab = "Selling price, log scale",
+        col = "lightgreen")
+```
+
+### Interpretation
+
+The exploratory analysis shows that `max_power` has a strong positive relationship with selling price. Cars with higher power generally have higher prices. The variables `car_age` and `km_driven` are negatively related to price because older cars and cars with more usage usually sell for less.
+
+The histograms show why the log transformation is useful: raw selling price is skewed, while `log_price` is more suitable for linear regression. The boxplots also show that categorical features such as transmission and fuel type are related to selling price.
+
+
+
+## 5. Train-Test Split
+
+
+```{r train-test-split}
+train_id = sample(1:nrow(car), size = 0.80 * nrow(car))
+
+train = car[train_id, ]
+test = car[-train_id, ]
+
+data.frame(
+  Dataset = c("Training", "Testing"),
+  Rows = c(nrow(train), nrow(test))
+)
+```
+
+### Interpretation
+
+An 80-20 split is used so that the models are trained on most of the data and then tested on unseen observations. This helps evaluate how well the models generalize beyond the training sample.
+
+## 6. Simple Linear Regression
+
+
+```{r simple-linear-regression}
+simple_model = lm(log_price ~ max_power, data = train)
+summary(simple_model)
+
+simple_r2 = summary(simple_model)$r.squared
+simple_beta = coef(simple_model)["max_power"]
+simple_p = summary(simple_model)$coefficients["max_power", "Pr(>|t|)"]
+
+simple_results = data.frame(
+  Coefficient = simple_beta,
+  Approx_Percent_Effect = (exp(simple_beta) - 1) * 100,
+  R_Squared = simple_r2,
+  P_Value = simple_p
+)
+
+knitr::kable(round(simple_results, 4),
+             caption = "Simple Regression Results")
+```
+
+### Interpretation
+
+`max_power` was chosen for the simple linear regression because it showed the strongest positive correlation with log_price among the numerical predictors. It is also practically meaningful, since more powerful cars usually have higher market value. Therefore, it provides a good single-variable baseline model before building the multiple regression model.
+
+The coefficient of `max_power` is `r round(simple_beta, 4)`. Since the dependent variable is `log_price`, a one-unit increase in `max_power` is associated with an approximate `r round((exp(simple_beta) - 1) * 100, 2)` percent change in selling price, holding this simple one-predictor relationship constant.
+
+The R-squared value is `r round(simple_r2, 3)`, which means that `max_power` explains a meaningful part of the variation in log selling price. The p-value is `r format.pval(simple_p, digits = 3)`, so `max_power` is statistically significant in the simple regression model.
+
+
+## 7. Multiple Linear Regression
+
+
+```{r multiple-linear-regression}
+full_formula = log_price ~ car_age + log_km_driven + fuel + seller_type +
+  transmission + owner + mileage + engine + max_power + seats + brand
+
+multiple_model = lm(full_formula, data = train)
+summary(multiple_model)
+
+model_comparison = data.frame(
+  Model = c("Simple Regression", "Multiple Regression"),
+  R_Squared = c(summary(simple_model)$r.squared,
+                summary(multiple_model)$r.squared),
+  Adjusted_R_Squared = c(summary(simple_model)$adj.r.squared,
+                         summary(multiple_model)$adj.r.squared)
+)
+
+model_comparison_display = model_comparison
+model_comparison_display[, -1] = round(model_comparison_display[, -1], 4)
+
+knitr::kable(model_comparison_display,
+             caption = "Regression Model Comparison")
+```
+
+### Interpretation
+
+The multiple regression model includes numerical and categorical predictors together. The adjusted R-squared value of the multiple regression model is `r round(summary(multiple_model)$adj.r.squared, 3)`, which is higher than the simple model. This indicates that adding variables such as age, kilometres driven, fuel type, transmission, ownership, engine size, power, seats, and brand improves explanatory power.
+
+The coefficient of `car_age` is expected to be negative because older cars usually lose value. The coefficient of `log_km_driven` is also expected to be negative because cars with more usage usually have lower resale prices. The coefficient of `max_power` is expected to be positive because more powerful cars tend to be costlier. Categorical coefficients are interpreted relative to their reference categories.
+
+## 8. Diagnostic Analysis
+
+
+```{r diagnostic-plots}
+old_par = par(no.readonly = TRUE)
+par(mfrow = c(2, 2))
+plot(multiple_model)
+par(old_par)
+```
+
+```{r diagnostic-calculations}
+res = residuals(multiple_model)
+std_res = rstandard(multiple_model)
+lev = hatvalues(multiple_model)
+cooks = cooks.distance(multiple_model)
+
+n = nrow(train)
+p = length(coef(multiple_model))
+
+outlier_limit = 3
+leverage_limit = 2 * p / n
+cook_limit = 4 / n
+
+outlier_rows = which(abs(std_res) > outlier_limit)
+leverage_rows = which(lev > leverage_limit)
+influential_rows = which(cooks > cook_limit)
+
+diagnostic_table = data.frame(
+  Observation = as.integer(rownames(train)),
+  selling_price = train$selling_price,
+  fitted_value = fitted(multiple_model),
+  residual = res,
+  standardized_residual = std_res,
+  leverage = lev,
+  cooks_distance = cooks
+)
+
+diagnostic_table$outlier =
+  abs(diagnostic_table$standardized_residual) > outlier_limit
+diagnostic_table$high_leverage = diagnostic_table$leverage > leverage_limit
+diagnostic_table$influential = diagnostic_table$cooks_distance > cook_limit
+
+outlier_table = diagnostic_table[diagnostic_table$outlier == TRUE, ]
+leverage_table = diagnostic_table[diagnostic_table$high_leverage == TRUE, ]
+influential_table = diagnostic_table[diagnostic_table$influential == TRUE, ]
+
+diagnostic_summary = data.frame(
+  Measure = c("Residual outliers",
+              "High leverage points",
+              "Influential points"),
+  Rule = c(
+    paste("absolute standardized residual >", outlier_limit),
+    paste("leverage >", round(leverage_limit, 4)),
+    paste("Cook's D >", round(cook_limit, 6))
+  ),
+  Count = c(length(outlier_rows),
+            length(leverage_rows),
+            length(influential_rows))
+)
+
+knitr::kable(diagnostic_summary,
+             caption = "Outlier, Leverage, and Influence Summary")
+```
+
+```{r leverage-cooks-plot}
+plot(lev, cooks,
+     main = "Leverage and Cook's Distance",
+     xlab = "Leverage",
+     ylab = "Cook's distance",
+     pch = 16,
+     col = "gray")
+abline(v = leverage_limit, col = "blue", lwd = 2)
+abline(h = cook_limit, col = "red", lwd = 2)
+```
+
+```{r residual-tests}
+shapiro.test(sample(res, min(5000, length(res))))
+ncvTest(multiple_model)
+
+vif_values = vif(multiple_model)
+vif_values
+```
+
+```{r diagnostic-tables}
+head(outlier_table, 10)
+head(leverage_table, 10)
+head(influential_table, 10)
+```
+
+### Interpretation
+
+The diagnostic plots are used to check linear regression assumptions. The residual plot helps evaluate whether residuals are randomly scattered, the Q-Q plot helps check normality, and the scale-location plot helps assess constant variance.
+
+There are `r length(outlier_rows)` residual outliers, `r length(leverage_rows)` high leverage points, and `r length(influential_rows)` influential points using the selected rules. Outliers have large standardized residuals, high leverage points have unusual predictor values, and influential observations strongly affect the fitted regression model.
+
+The VIF values are used to check multicollinearity. Since `engine` and `max_power` are related, multicollinearity is important to evaluate before relying only on ordinary least squares coefficients.
+
+## 9. Ridge Regression
+
+
+```{r ridge-regression}
+x_train = model.matrix(full_formula, data = train)[, -1]
+y_train = train$log_price
+x_test = model.matrix(full_formula, data = test)[, -1]
+y_test = test$log_price
+
+ridge_model = cv.glmnet(x_train, y_train, alpha = 0, standardize = TRUE)
+
+data.frame(
+  Lambda_Min = ridge_model$lambda.min,
+  Lambda_1SE = ridge_model$lambda.1se
+)
+```
+
+```{r ridge-plot}
+plot(ridge_model)
+```
+
+```{r ridge-coefficients}
+ridge_coef = coef(ridge_model, s = "lambda.min")
+head(as.matrix(ridge_coef), 10)
+```
+
+### Interpretation
+
+Ridge regression is useful when predictors are correlated because it shrinks coefficients toward zero. It does not remove variables completely, but it reduces the instability caused by multicollinearity. The best Ridge lambda selected by cross validation is `r ridge_model$lambda.min`.
+
+## 10. LASSO Regression
+
+
+```{r lasso-regression}
+lasso_model = cv.glmnet(x_train, y_train, alpha = 1, standardize = TRUE)
+
+data.frame(
+  Lambda_Min = lasso_model$lambda.min,
+  Lambda_1SE = lasso_model$lambda.1se
+)
+```
+
+```{r lasso-plot}
+plot(lasso_model)
+```
+
+```{r lasso-coefficients}
+lasso_coef = coef(lasso_model, s = "lambda.min")
+lasso_coef_matrix = as.matrix(lasso_coef)
+head(lasso_coef_matrix, 10)
+
+zero_lasso = rownames(lasso_coef_matrix)[lasso_coef_matrix[, 1] == 0]
+zero_lasso
+```
+
+### Interpretation
+
+LASSO regression is used for feature selection because it can shrink weak coefficients exactly to zero. In this model, `r length(zero_lasso)` coefficient(s) are reduced to zero at the selected lambda value. This means LASSO keeps only the variables that contribute most strongly to prediction under its penalty.
+
+## 11. Elastic Net Regression
+
+
+```{r elastic-net}
+alpha_values = seq(0.1, 0.9, by = 0.2)
+elastic_results = data.frame()
+elastic_models = list()
+
+for (a in alpha_values) {
+  model = cv.glmnet(x_train, y_train, alpha = a, standardize = TRUE)
+  elastic_models[[as.character(a)]] = model
+
+  elastic_results = rbind(
+    elastic_results,
+    data.frame(alpha = a,
+               lambda = model$lambda.min,
+               cv_error = min(model$cvm))
+  )
+}
+
+best_alpha = elastic_results$alpha[which.min(elastic_results$cv_error)]
+elastic_model = elastic_models[[as.character(best_alpha)]]
+
+knitr::kable(elastic_results,
+             caption = "Elastic Net Cross Validation Results")
+
+data.frame(
+  Best_Alpha = best_alpha,
+  Best_Lambda = elastic_model$lambda.min
+)
+```
+
+### Interpretation
+
+Elastic Net combines Ridge and LASSO penalties. When `alpha` is close to 0, the model behaves more like Ridge regression; when `alpha` is close to 1, it behaves more like LASSO. The best alpha selected here is `r best_alpha`, which gives the lowest cross validation error among the tested alpha values.
+
+## 12. Model Selection
+
+
+```{r model-selection}
+selection_formula = log_price ~ car_age + log_km_driven + mileage +
+  engine + max_power + seats + fuel + seller_type + transmission + owner
+
+selection_x_train = model.matrix(selection_formula, data = train)[, -1]
+selection_x_test = model.matrix(selection_formula, data = test)[, -1]
+
+best_subset = regsubsets(x = selection_x_train, y = y_train,
+                         nvmax = 10, method = "exhaustive")
+forward_model = regsubsets(x = selection_x_train, y = y_train,
+                           nvmax = 10, method = "forward")
+backward_model = regsubsets(x = selection_x_train, y = y_train,
+                            nvmax = 10, method = "backward")
+
+best_summary = summary(best_subset)
+forward_summary = summary(forward_model)
+backward_summary = summary(backward_model)
+
+selection_table = data.frame(
+  Model_Size = 1:10,
+  Best_Subset_Adj_R2 = best_summary$adjr2,
+  Best_Subset_BIC = best_summary$bic,
+  Best_Subset_Cp = best_summary$cp,
+  Forward_Adj_R2 = forward_summary$adjr2,
+  Backward_Adj_R2 = backward_summary$adjr2
+)
+
+knitr::kable(selection_table,
+             caption = "Model Selection Table")
+
+best_bic_size = which.min(best_summary$bic)
+selected_bic_variables = names(coef(best_subset, best_bic_size))[-1]
+
+data.frame(
+  Best_BIC_Model_Size = best_bic_size,
+  Selected_Variables = paste(selected_bic_variables, collapse = ", ")
+)
+```
+
+### Interpretation
+
+Adjusted R-squared adjusts model fit for the number of predictors, BIC penalizes complex models more strongly, and Mallows Cp compares model bias and variance. Based on BIC, the best subset model size is `r best_bic_size`. The selected variables are `r paste(selected_bic_variables, collapse = ", ")`.
+
+## 13. Prediction and Performance Comparison
+
+```{r model-performance}
+model_metrics = function(actual, predicted, predictors) {
+  rmse = sqrt(mean((actual - predicted)^2))
+  mae = mean(abs(actual - predicted))
+  r2 = 1 - sum((actual - predicted)^2) / sum((actual - mean(actual))^2)
+  adjusted_r2 = 1 - ((1 - r2) * (length(actual) - 1) /
+                       (length(actual) - predictors - 1))
+
+  return(c(RMSE = rmse, MAE = mae, R2 = r2, Adjusted_R2 = adjusted_r2))
+}
+
+pred_simple = exp(predict(simple_model, newdata = test))
+pred_multiple = exp(predict(multiple_model, newdata = test))
+pred_ridge = exp(as.numeric(predict(ridge_model, newx = x_test, s = "lambda.min")))
+pred_lasso = exp(as.numeric(predict(lasso_model, newx = x_test, s = "lambda.min")))
+pred_elastic = exp(as.numeric(predict(elastic_model, newx = x_test, s = "lambda.min")))
+
+predict_subset = function(model, new_x, id) {
+  model_coef = coef(model, id = id)
+  selected_vars = names(model_coef)
+  new_x_intercept = cbind("(Intercept)" = 1, new_x)
+  prediction = new_x_intercept[, selected_vars] %*% model_coef
+  return(as.numeric(prediction))
+}
+
+pred_subset_log = predict_subset(best_subset, selection_x_test, best_bic_size)
+pred_subset = exp(pred_subset_log)
+
+actual_price = test$selling_price
+
+performance = rbind(
+  Multiple_Regression = model_metrics(actual_price, pred_multiple,
+                                      length(coef(multiple_model)) - 1),
+  Elastic_Net = model_metrics(actual_price, pred_elastic,
+                              sum(as.matrix(coef(elastic_model, s = "lambda.min"))[-1, 1] != 0)),
+  LASSO = model_metrics(actual_price, pred_lasso,
+                        sum(as.matrix(coef(lasso_model, s = "lambda.min"))[-1, 1] != 0)),
+  Ridge = model_metrics(actual_price, pred_ridge,
+                        ncol(x_train)),
+  Best_Subset = model_metrics(actual_price, pred_subset,
+                              length(coef(best_subset, best_bic_size)) - 1),
+  Simple_Regression = model_metrics(actual_price, pred_simple, 1)
+)
+
+performance = as.data.frame(performance)
+performance$Model = rownames(performance)
+
+performance = performance[order(-performance$Adjusted_R2), ]
+
+knitr::kable(performance,
+             caption = "Test Set Performance Comparison")
+
+```
+
+```{r performance-plot}
+barplot(performance$Adjusted_R2,
+        names.arg = performance$Model,
+        las = 2,
+        col = "lightblue",
+        main = "Model Comparison by Adjusted R-squared",
+        ylab = "Adjusted R-squared")
+
+```
+
+
+### Interpretation
+
+The models were compared using R-squared and Adjusted R-squared. R-squared shows how much variation in selling price is explained by the model. Adjusted R-squared is preferred because it also considers the number of predictors. The model with the highest Adjusted R-squared is considered the best model. In this table, Multiple Regression has the highest Adjusted R-squared, so it is selected as the best model.
+
+## 14. K-Fold Cross Validation
+
+
+```{r k-fold-cross-validation}
+k = 5
+folds = sample(rep(1:k, length.out = nrow(car)))
+
+cv_results = data.frame()
+
+for (i in 1:k) {
+
+  train_fold = car[folds != i, ]
+  valid_fold = car[folds == i, ]
+
+  x_fold_train = model.matrix(full_formula, data = train_fold)[, -1]
+  y_fold_train = train_fold$log_price
+
+  x_fold_valid = model.matrix(full_formula, data = valid_fold)[, -1]
+  y_fold_valid = valid_fold$log_price
+
+  lm_fold = lm(full_formula, data = train_fold)
+
+  ridge_fold = glmnet(
+    x_fold_train,
+    y_fold_train,
+    alpha = 0,
+    lambda = ridge_model$lambda.min
+  )
+
+  lasso_fold = glmnet(
+    x_fold_train,
+    y_fold_train,
+    alpha = 1,
+    lambda = lasso_model$lambda.min
+  )
+
+  elastic_fold = glmnet(
+    x_fold_train,
+    y_fold_train,
+    alpha = best_alpha,
+    lambda = elastic_model$lambda.min
+  )
+
+  pred_lm_fold = predict(lm_fold, newdata = valid_fold)
+
+  pred_ridge_fold = as.numeric(
+    predict(ridge_fold, newx = x_fold_valid)
+  )
+
+  pred_lasso_fold = as.numeric(
+    predict(lasso_fold, newx = x_fold_valid)
+  )
+
+  pred_elastic_fold = as.numeric(
+    predict(elastic_fold, newx = x_fold_valid)
+  )
+
+  cv_results = rbind(
+
+    cv_results,
+
+    data.frame(
+      Fold = i,
+      Model = "Multiple Regression",
+      t(model_metrics(
+        y_fold_valid,
+        pred_lm_fold,
+        length(coef(lm_fold)) - 1
+      ))
+    ),
+
+    data.frame(
+      Fold = i,
+      Model = "Ridge",
+      t(model_metrics(
+        y_fold_valid,
+        pred_ridge_fold,
+        ncol(x_fold_train)
+      ))
+    ),
+
+    data.frame(
+      Fold = i,
+      Model = "LASSO",
+      t(model_metrics(
+        y_fold_valid,
+        pred_lasso_fold,
+        sum(as.matrix(coef(lasso_fold))[-1, 1] != 0)
+      ))
+    ),
+
+    data.frame(
+      Fold = i,
+      Model = "Elastic Net",
+      t(model_metrics(
+        y_fold_valid,
+        pred_elastic_fold,
+        sum(as.matrix(coef(elastic_fold))[-1, 1] != 0)
+      ))
+    )
+  )
+}
+
+model_metrics = function(actual, predicted, p) {
+
+  rss = sum((actual - predicted)^2)
+  tss = sum((actual - mean(actual))^2)
+
+  r2 = 1 - rss/tss
+
+  n = length(actual)
+
+  adj_r2 = 1 - ((1 - r2) * (n - 1)/(n - p - 1))
+
+  rmse = sqrt(mean((actual - predicted)^2))
+
+  return(c(
+    R2 = r2,
+    Adjusted_R2 = adj_r2,
+    RMSE = rmse
+  ))
+}
+
+cv_summary = aggregate(cbind(R2, RMSE) ~ Model,
+                       data = cv_results,
+                       FUN = mean)
+
+cv_summary = cv_summary[order(-cv_summary$R2,
+                              cv_summary$RMSE), ]
+
+knitr::kable(
+  cv_summary,
+  digits = 4,
+  caption = "5-Fold Cross Validation Summary Using R-squared and RMSE"
+)
+
+```
+
+### Interpretation
+
+Cross validation checks whether model performance is stable across different samples of the data. In this analysis, the models are compared using average R-squared and RMSE across the five folds.
+
+R-squared shows how much variation in `log_price` is explained by the model. MSE measures the average prediction error, where lower values indicate better predictive accuracy.
+
+Based on average cross validation results best model is `r cv_summary$Model[1]`, as it achieves the highest R-squared along with the lowest RMSE across the validation folds. 
+Since the cross validation metrics are calculated on the `log_price` scale, they should be interpreted separately from the test set performance table, which is on the original price scale.
+
+
+## 15. Final Conclusion
+
+
+```{r final-conclusion}
+best_model = performance$Model[1]
+best_cv_model = cv_summary$Model[1]
+
+data.frame(
+  Best_Test_Model = best_model,
+  Best_Cross_ValidModel = best_cv_model
+)
+```
+
+### Interpretation
+
+The best model based on test set performance is Multiple Regression. It achieved the highest predictive performance while maintaining interpretability and stability across cross-validation folds.
+
+Simple regression is easy to explain but has weaker explanatory power because it uses only one predictor. 
+
+Multiple regression is more interpretable than regularized models because its coefficients are easier to explain directly.
+
+Ridge regression is useful when multicollinearity exists, LASSO helps with feature selection, and Elastic Net balances the advantages of Ridge and LASSO. 
+The diagnostic analysis also identifies outliers, high leverage points, and influential observations that should be considered when evaluating the reliability of the regression model.
+
+
+
+
+
+
+
